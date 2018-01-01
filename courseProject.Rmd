@@ -1,0 +1,141 @@
+---
+title: "Course Project - Practical Machine Learning"
+author: "EV"
+date: "1/1/2018"
+output: html_document
+---
+# Project Overwiew
+The goal of this project is to develop a model to predict the manner in which the subjects do the exercises. The data is taken from this site: http://groupware.les.inf.puc-rio.br/har.
+
+# The data
+## Load data
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+library(impute)
+library(rpart)
+library(rpart.plot)
+
+# Locad data
+pml_training = read.csv("pml-training.csv")
+pml_testing = read.csv("pml-testing.csv")
+
+```
+
+## Select columns and parameters for the model
+Find columns with missing values and show min / max values of % of missing values in the columns
+
+```{r}
+cols_with_na = apply(apply(pml_training, 2, function(x) {is.na(x) | x==''}), 2, sum)
+cols_with_na = cols_with_na[cols_with_na > 0]
+print(range(cols_with_na / dim(pml_training)[1]))
+```
+
+These fields have missed values in > 97% of rows. 
+No reason to keep them for the prediction.
+Remove these columns from training and testing sets. Remove also "X" and all columns with "timestamp".
+```{r}
+pml_training = pml_training[, setdiff(names(pml_training), names(cols_with_na)) ]
+pml_testing = pml_testing[, setdiff(names(pml_testing), names(cols_with_na)) ]
+pml_training = select(pml_training, -contains("timestamp"), -X)
+pml_testing = select(pml_testing, -contains("timestamp"), -X)
+```
+
+## Cross-validation for model selection
+Let's use the Cross-Validation method for selecting an optimal columns set for the model.
+```{r, cache=TRUE}
+all_coumns = names(pml_training)
+predictors = all_coumns[all_coumns != 'classe']
+
+set.seed(190)
+
+models = list(
+  all_coumns,
+  c("classe", predictors[sample(1:length(predictors), size = length(predictors)* 0.5)]),
+  c("classe", predictors[sample(1:length(predictors), size = length(predictors)* 0.5)]),
+  c("classe", predictors[sample(1:length(predictors), size = length(predictors)* 0.5)]),
+  c("classe", predictors[sample(1:length(predictors), size = length(predictors)* 0.5)])
+)
+
+k = 10
+folds = createFolds(1:dim(pml_training)[1], k = k)
+accuracy = matrix(NA, nrow = k, ncol = length(models))
+
+for(fold in 1:length(folds)) {
+  for (model in 1:length(models)) {
+    tr = pml_training[-folds[[fold]], models[[model]]]
+    te = pml_training[folds[[fold]], models[[model]]]
+    
+    fit <- rpart(classe ~ ., data=tr, control = rpart.control(cp=0.001))
+    pr = predict(fit, te)
+    predicted_classes = factor(colnames(pr)[apply(pr, 1, which.max)])
+    accuracy[fold, model] = confusionMatrix(predicted_classes, te$classe)$overall["Accuracy"]
+  }
+}
+
+accuracy = data.frame(t(apply(accuracy, 2, mean)))
+colnames(accuracy) <- c("all columns", "model1", "model2", "model3", "model4")
+print(apply(accuracy, 2, mean))
+```
+Using all columns gives the best accuracy.
+
+## Find an optimal cp value
+```{r, cache=TRUE}
+cps = .1 / 10^(1:5)
+accuracy = matrix(NA, nrow = k, ncol = length(cps))
+
+for(fold in 1:length(folds)) {
+  for (cp in 1:length(cps)) {
+    tr = pml_training[-folds[[fold]],]
+    te = pml_training[folds[[fold]], ]
+    
+    fit <- rpart(classe ~ ., data=tr, control = rpart.control(cp=cps[cp]))
+    pr = predict(fit, te)
+    predicted_classes = factor(colnames(pr)[apply(pr, 1, which.max)])
+    accuracy[fold, cp] = confusionMatrix(predicted_classes, te$classe)$overall["Accuracy"]
+  }
+}
+
+accuracy = data.frame(t(apply(accuracy, 2, mean)))
+colnames(accuracy) <- cps
+plot(x=1:5, y=accuracy, xlab = "cp (0.1 / 10^n)", ylab = "Accuracy")
+print(apply(accuracy, 2, mean))
+
+```
+The optimal value for cp is 1e-04
+
+# Train the model
+## Split into training and testing sets
+
+The testing data from pml-testing.csv does not contain the class colomn. 
+To test the model we need to split pml-training.csv data into training and testing sets.
+Split pml_training into training and testing in proportion 70/30:
+```{r}
+trainIds = sample(1:dim(pml_training)[1], size=dim(pml_training)[1]*0.7, replace=F)
+training = pml_training[trainIds,]
+testing = pml_training[-trainIds,]
+```
+
+## Train
+```{r}
+set.seed(12345)
+fit<-rpart(classe ~ ., data=training, control = rpart.control(cp=1e-04))
+plotcp(fit)
+```
+
+## Test the model
+```{r}
+pr = predict(fit, testing)
+predicted_classes = factor(colnames(pr)[apply(pr, 1, which.max)])
+
+# Check prediction quality
+print(confusionMatrix(predicted_classes, testing$classe))
+```
+
+# Predict classes for pml-testing.csv data
+```{r}
+pml_pr = predict(fit, pml_testing)
+print(t(data.frame(class=factor(colnames(pml_pr)[apply(pml_pr, 1, which.max)]))))
+```
+
